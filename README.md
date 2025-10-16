@@ -229,7 +229,7 @@ Distributed under the MIT License. See `LICENSE.txt` for more information.
 
 ## **📧 Contact & Support**
 
-- Shubham Prajapati - [shubhamprajapati7748@gmail.com](mailto:shubhamprajapati7748@gmail.com)
+- Dev Desai - [devdesaiofficial@gmail.com](mailto:devdesaiofficial@gmail.com)
 
 ---
 
