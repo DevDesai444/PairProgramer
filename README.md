@@ -1,299 +1,300 @@
 # SDLC Copilot
 
-An AI-powered SDLC orchestration platform that takes a project from requirements to deployment guidance through a structured, review-driven workflow.
+SDLC Copilot is a full-stack AI-assisted workflow system that drives a software project through major SDLC stages using a **stateful LangGraph pipeline** and **human approvals at review checkpoints**.
 
-It combines:
-- **Backend orchestration** with FastAPI + LangGraph.
-- **Multi-model LLM generation/revision** (Gemini, Groq/Qwen, Anthropic/Claude).
-- **Human-in-the-loop approvals** at key SDLC checkpoints.
-- **Frontend workflow UI** built with React + Vite + Tailwind.
+It is composed of:
+- A **FastAPI backend** that orchestrates workflow execution, state transitions, and session persistence.
+- A **React frontend** that presents phase artifacts and collects approval/feedback.
+- **LLM-backed phase nodes** (Gemini, Groq/Qwen, Anthropic) for generation and revision.
+- **Redis session storage** for API-facing state continuity.
 
 ---
 
 ## Table of Contents
-- [What this project does](#what-this-project-does)
-- [High-level architecture](#high-level-architecture)
-- [End-to-end workflow](#end-to-end-workflow)
-- [Backend deep dive](#backend-deep-dive)
-  - [Core responsibilities](#core-responsibilities)
-  - [State model](#state-model)
-  - [Graph orchestration model](#graph-orchestration-model)
-  - [API surface](#api-surface)
-  - [Persistence and sessioning](#persistence-and-sessioning)
-- [Frontend deep dive](#frontend-deep-dive)
-  - [Routing and phase flow](#routing-and-phase-flow)
-  - [Phase UX and review loop](#phase-ux-and-review-loop)
-- [Project structure](#project-structure)
-- [Local development setup](#local-development-setup)
+- [Core capabilities](#core-capabilities)
+- [Architecture](#architecture)
+  - [System architecture drawing](#system-architecture-drawing)
+  - [Workflow architecture drawing](#workflow-architecture-drawing)
+- [How the workflow works](#how-the-workflow-works)
+- [Backend architecture deep dive](#backend-architecture-deep-dive)
+  - [Runtime model](#runtime-model)
+  - [State contract (`SDLCState`)](#state-contract-sdlcstate)
+  - [Graph topology and branching](#graph-topology-and-branching)
+  - [API endpoints](#api-endpoints)
+- [Frontend architecture deep dive](#frontend-architecture-deep-dive)
+- [Repository structure](#repository-structure)
+- [Setup and run](#setup-and-run)
 - [Configuration](#configuration)
-- [How a typical run works](#how-a-typical-run-works)
-- [Known implementation notes](#known-implementation-notes)
-- [Roadmap ideas](#roadmap-ideas)
+- [Current limitations / implementation notes](#current-limitations--implementation-notes)
+- [Suggested next improvements](#suggested-next-improvements)
 
 ---
 
-## What this project does
+## Core capabilities
 
-`SDLC Copilot` guides a project through these phases:
+SDLC Copilot covers these implemented phases:
 1. Requirements intake
-2. User stories generation + review
-3. Functional design generation + review
-4. Technical design generation + review
-5. Frontend code generation + review
-6. Backend code generation + review
-7. Security review + remediation
-8. Test case generation + review
-9. QA testing + remediation loop
+2. User stories generation + owner review
+3. Functional design generation + owner review
+4. Technical design generation + owner review
+5. Frontend code generation + owner review
+6. Backend code generation + owner review
+7. Security review + optional backend fix loop
+8. Test case generation + owner review
+9. QA testing + optional backend fix loop
 10. Deployment steps generation
 
-The system supports **iterative revisions** at approval checkpoints and transitions to the next stage only after approval-like decisions.
+The workflow is **not single-shot**; it is **iterative**, and phase transitions are driven by explicit review outcomes.
 
 ---
 
-## High-level architecture
+## Architecture
+
+### System architecture drawing
 
 ```mermaid
 flowchart LR
-    U[Product Owner / User] --> FE[React Frontend]
-    FE -->|HTTP JSON| API[FastAPI Backend]
+    U[Product Owner] --> FE[React + Vite Frontend]
+    FE -->|REST/JSON| API[FastAPI API Layer]
+
     API --> WF[LangGraph SDLC Workflow]
-    WF --> LLM1[Gemini]
-    WF --> LLM2[Groq Qwen]
-    WF --> LLM3[Anthropic Claude]
-    API --> R[(Redis Session Store)]
+    API --> RS[(Redis Session Store)]
 
-    subgraph SDLC Graph
-      N1[User Stories]
-      N2[Functional Doc]
-      N3[Technical Doc]
-      N4[Frontend Code]
-      N5[Backend Code]
-      N6[Security Review]
-      N7[Test Cases]
-      N8[QA Testing]
-      N9[Deployment]
-      N1-->N2-->N3-->N4-->N5-->N6-->N7-->N8-->N9
-    end
+    WF --> GM[Gemini]
+    WF --> GQ[Groq / Qwen]
+    WF --> AN[Anthropic / Claude]
 
-    WF --- SDLC Graph
+    WF --> ST[SDLCState]
+    ST --> API
+```
+
+### Workflow architecture drawing
+
+```mermaid
+flowchart TD
+    A[Start: /stories/generate] --> B[Generate User Stories]
+    B --> C{User Story Review}
+    C -- Feedback --> B2[Revise User Stories]
+    B2 --> C
+    C -- Approved --> D[Create Functional Doc]
+
+    D --> E{Functional Review}
+    E -- Feedback --> D2[Revise Functional Doc]
+    D2 --> E
+    E -- Approved --> F[Create Technical Doc]
+
+    F --> G{Technical Review}
+    G -- Feedback --> F2[Revise Technical Doc]
+    F2 --> G
+    G -- Approved --> H[Generate Frontend Code]
+
+    H --> I{Frontend Review}
+    I -- Feedback --> H2[Fix Frontend Code]
+    H2 --> I
+    I -- Approved --> J[Generate Backend Code]
+
+    J --> K{Backend Review}
+    K -- Feedback --> J2[Fix Backend Code]
+    J2 --> K
+    K -- Approved --> L[Generate Security Reviews]
+
+    L --> M{Security Review}
+    M -- Feedback --> M2[Fix Code After Security]
+    M2 --> K
+    M -- Approved --> N[Generate Test Cases]
+
+    N --> O{Test Case Review}
+    O -- Feedback --> N2[Revise Test Cases]
+    N2 --> O
+    O -- Approved --> P[Perform QA Testing]
+
+    P -- Failed --> P2[Fix Code After QA]
+    P2 --> K
+    P -- Passed --> Q[Generate Deployment Steps]
+    Q --> R[End]
 ```
 
 ---
 
-## End-to-end workflow
+## How the workflow works
 
-The backend compiles a LangGraph state machine (`SDLCState`) where each phase has:
-- output artifact(s),
-- message history,
-- status field,
-- conditional transition function.
+1. Frontend submits requirements to `POST /stories/generate`.
+2. Backend creates a session (`session_id`), starts LangGraph execution, and persists session payload in Redis.
+3. Execution pauses before configured review nodes (`interrupt_before`) and waits for owner input.
+4. Owner submits either:
+   - `approved` → graph advances to next phase.
+   - textual feedback → graph routes to revise/fix node and re-enters review.
+5. This repeats through design, code, security, tests, QA, and deployment.
 
-Human review stages are configured with `interrupt_before`, so execution pauses before review nodes. The API then accepts owner feedback (`approved` or comments), updates graph state, and resumes execution.
-
-This yields a deterministic, resumable approval pipeline rather than a single-shot generation call.
-
----
-
-## Backend deep dive
-
-### Core responsibilities
-- Serve phase-wise REST APIs for generation/review/retrieval.
-- Build and execute the SDLC graph.
-- Manage workflow session continuity using a `thread_id` and Redis cache.
-- Marshal graph state into pydantic response models.
-
-### State model
-`SDLCState` is the central contract with typed fields for:
-- requirements,
-- user stories,
-- functional/technical documents,
-- frontend/backend code,
-- security reviews,
-- test cases,
-- QA report,
-- deployment steps,
-- status fields and revision counters.
-
-### Graph orchestration model
-The graph is built in `SDLCGraphBuilder` and wires nodes in sequence with conditional edges:
-- review nodes branch to either:
-  - revision node (feedback path), or
-  - next phase (approved path).
-- QA has pass/fail branching:
-  - fail → backend fix loop,
-  - pass → deployment generation.
-
-### API surface
-The FastAPI app exposes:
-
-- Health/status:
-  - `GET /health`
-  - `GET /status`
-
-- User stories:
-  - `POST /stories/generate`
-  - `POST /stories/review/{session_id}`
-
-- Functional docs:
-  - `POST /documents/functional/generate/{session_id}`
-  - `POST /documents/functional/review/{session_id}`
-
-- Technical docs:
-  - `POST /documents/technical/generate/{session_id}`
-  - `POST /documents/technical/review/{session_id}`
-
-- Code:
-  - `POST /code/frontend/generate/{session_id}`
-  - `POST /code/frontend/review/{session_id}`
-  - `POST /code/backend/generate/{session_id}`
-  - `POST /code/backend/review/{session_id}`
-
-- Security:
-  - `GET /security/review/get/{session_id}`
-  - `POST /security/review/review/{session_id}`
-
-- Testing & QA:
-  - `GET /test/cases/get/{session_id}`
-  - `POST /test/cases/review/{session_id}`
-  - `GET /qa/testing/get/{session_id}`
-
-- Deployment:
-  - `GET /deployment/get/{session_id}`
-
-### Persistence and sessioning
-- **LangGraph MemorySaver** checkpoints workflow state while running.
-- **Redis** stores normalized session artifacts for API retrieval and validation.
-- `session_validator` enforces legal phase transitions and prevents invalid calls.
+This model gives deterministic phase gating with resumable state.
 
 ---
 
-## Frontend deep dive
+## Backend architecture deep dive
 
-### Routing and phase flow
-- `/` → project requirements intake form.
-- `/sdlc` → multi-phase workspace with:
-  - phase sidebar,
-  - phase content panel,
-  - approval/feedback bar.
+### Runtime model
 
-Phase progression is controlled by `completedPhases` + lock/unlock logic in the sidebar.
+`backend/app.py` builds shared app state on startup:
+- Redis client
+- async HTTP client
+- compiled `SDLCGraphBuilder` workflow
 
-### Phase UX and review loop
-- Initial submission calls `/stories/generate`.
-- Every reviewable phase has:
-  - **Approve & Continue** → sends `{ feedback: "approved" }` to mapped review endpoint.
-  - **Feedback input** → sends free-text feedback for revision.
-- Phase screens fetch generated artifacts from backend and render them (markdown/code/cards).
+The API layer then:
+- validates request sequence (`session_validator`),
+- reads/writes session payloads in Redis,
+- updates LangGraph thread state and streams forward execution,
+- returns phase-specific DTOs from `responses.py`.
+
+### State contract (`SDLCState`)
+
+`SDLCState` is the canonical graph state and includes:
+- requirements and artifact payloads (stories/docs/code/reviews/tests/qa/deployment),
+- message histories for each phase,
+- phase status fields,
+- revision count for iterative loops.
+
+This keeps all phase data in one typed contract across nodes.
+
+### Graph topology and branching
+
+`SDLCGraphBuilder` registers nodes for each SDLC step and wires:
+- linear forward edges for normal progression,
+- conditional edges for approved vs feedback paths,
+- remediation loops from Security/QA back into backend review path.
+
+Review nodes are interruption boundaries, enabling human-in-the-loop orchestration.
+
+### API endpoints
+
+| Stage | Endpoint | Method | Purpose |
+|---|---|---|---|
+| Health | `/health` | GET | Health payload |
+| Health | `/status` | GET | Server status model |
+| User stories | `/stories/generate` | POST | Start session and generate user stories |
+| User stories | `/stories/review/{session_id}` | POST | Approve/revise stories |
+| Functional doc | `/documents/functional/generate/{session_id}` | POST | Get generated functional doc |
+| Functional doc | `/documents/functional/review/{session_id}` | POST | Approve/revise functional doc |
+| Technical doc | `/documents/technical/generate/{session_id}` | POST | Get generated technical doc |
+| Technical doc | `/documents/technical/review/{session_id}` | POST | Approve/revise technical doc |
+| Frontend code | `/code/frontend/generate/{session_id}` | POST | Get generated frontend code |
+| Frontend code | `/code/frontend/review/{session_id}` | POST | Approve/revise frontend code |
+| Backend code | `/code/backend/generate/{session_id}` | POST | Get generated backend code |
+| Backend code | `/code/backend/review/{session_id}` | POST | Approve/revise backend code |
+| Security | `/security/review/get/{session_id}` | GET | Get security findings |
+| Security | `/security/review/review/{session_id}` | POST | Approve/fix-after-review flow |
+| Test cases | `/test/cases/get/{session_id}` | GET | Get test cases |
+| Test cases | `/test/cases/review/{session_id}` | POST | Approve/revise test cases |
+| QA | `/qa/testing/get/{session_id}` | GET | Get QA testing report |
+| Deployment | `/deployment/get/{session_id}` | GET | Get deployment steps |
 
 ---
 
-## Project structure
+## Frontend architecture deep dive
+
+The frontend is phase-oriented and route-driven:
+- `/` (`Home.tsx`): requirements form and session bootstrap.
+- `/sdlc` (`SDLC.tsx`): workspace with sidebar phase selector + active phase panel + chat approval bar.
+
+Key behavior:
+- `ChatInterface.tsx` maps selected phase to backend review endpoint.
+- "Approve & Continue" posts `{ feedback: "approved" }`.
+- Custom feedback posts free text for revise/fix paths.
+- `completedPhases` controls lock/unlock UI state in `SDLCPhaseSelector.tsx`.
+
+---
+
+## Repository structure
 
 ```text
 PairProgramer/
-├─ backend/
-│  ├─ app.py                         # FastAPI entrypoint and endpoint handlers
-│  ├─ workflow_test.py               # Scripted workflow runner
-│  ├─ requirements.txt
-│  └─ src/sdlccopilot/
-│     ├─ graph/sdlc_graph.py         # LangGraph topology
-│     ├─ nodes/                      # SDLC phase node implementations
-│     ├─ helpers/                    # LLM helper methods per phase
-│     ├─ prompts/                    # Prompt templates
-│     ├─ states/                     # Pydantic state models
-│     ├─ llms/                       # Provider wrappers (Gemini/Groq/Anthropic)
-│     ├─ requests.py                 # Request DTOs
-│     └─ responses.py                # Response DTOs
-├─ frontend/
-│  ├─ src/pages/                     # Home + SDLC pages
-│  ├─ src/phases/                    # Phase-specific views
-│  ├─ src/components/                # Shared UI components
-│  ├─ src/types.ts
-│  └─ config.ts                      # Backend URL from env
-└─ notebooks/                        # Prompt/prototype notebooks
+├── backend/
+│   ├── app.py                      # FastAPI entrypoint
+│   ├── workflow_test.py            # Manual end-to-end workflow exerciser
+│   ├── requirements.txt
+│   └── src/sdlccopilot/
+│       ├── graph/sdlc_graph.py     # LangGraph topology + compilation
+│       ├── nodes/                  # Per-phase node logic
+│       ├── helpers/                # LLM helper abstractions
+│       ├── prompts/                # Prompt templates
+│       ├── states/                 # Pydantic state models
+│       ├── llms/                   # LLM provider wrappers
+│       ├── requests.py             # Request DTOs
+│       └── responses.py            # Response DTOs
+├── frontend/
+│   ├── src/pages/                  # Home, SDLC workspace
+│   ├── src/phases/                 # Phase views
+│   ├── src/components/             # Reusable UI components
+│   ├── src/types.ts
+│   └── config.ts                   # VITE_BACKEND_URL binding
+└── notebooks/                      # Prompt/prototype exploration
 ```
 
 ---
 
-## Local development setup
+## Setup and run
 
 ### Prerequisites
 - Python 3.10+
 - Node.js 18+
-- Redis server
+- Redis
 
-### 1) Backend
+### Backend
 ```bash
 cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app:app --reload --host 0.0.0.0 --port 8000
+uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 2) Frontend
+### Frontend
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-### 3) Open app
+Open:
 - Frontend: `http://localhost:5173`
-- Backend docs: `http://localhost:8000/docs`
+- API docs: `http://localhost:8000/docs`
 
 ---
 
 ## Configuration
 
-### Backend env vars
-Set in backend runtime environment (or `.env`):
+### Backend environment variables
 
-- `PROJECT_ENVIRONMENT` (`development` uses constants/mocks in nodes)
-- `REDIS_HOST`
-- `REDIS_PORT`
-- `REDIS_PASSWORD`
+Typical required variables:
+- `PROJECT_ENVIRONMENT` (`development` enables mocked constants in many nodes)
+- `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`
 - `GROQ_API_KEY`
 - `ANTHROPIC_API_KEY`
-- `GEMINI_API_KEY` (used by Gemini wrapper)
-- `GOOGLE_API_KEY` (also set in app bootstrap)
-- `LANGSMITH_API_KEY`
-- `LANGSMITH_PROJECT`
-- `LANGSMITH_TRACING`
+- `GEMINI_API_KEY`
+- `GOOGLE_API_KEY`
+- `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_TRACING`
 
-### Frontend env vars
-In `frontend/.env`:
+### Frontend environment variables
 
+`frontend/.env`:
 ```env
 VITE_BACKEND_URL=http://localhost:8000
 ```
 
 ---
 
-## How a typical run works
+## Current limitations / implementation notes
 
-1. User submits requirements from Home page.
-2. Backend creates `session_id`, starts graph, halts at first review checkpoint.
-3. Frontend displays generated artifact.
-4. User approves or submits feedback.
-5. Backend updates graph state and resumes.
-6. Loop repeats until deployment steps are generated.
+- Deployment and maintenance appear in frontend phase list, but backend currently exposes deployment retrieval only and no maintenance pipeline.
+- Several nodes contain development-mode constants and simulated waits to support local demo runs.
+- Session persistence is split between LangGraph checkpoint memory and Redis API cache.
+- This repository includes notebook/prototyping assets in addition to the app runtime code.
 
 ---
 
-## Known implementation notes
+## Suggested next improvements
 
-- Some files include prototype/test artifacts and notebooks; this is both a production API and experimentation workspace.
-- Review flow is strict: direct calls out of sequence are blocked by server-side session validation.
-- QA state modeling and frontend QA rendering should be kept aligned (backend returns structured QA object; frontend currently maps it similarly to test-case cards).
-- `PROJECT_ENVIRONMENT=development` enables deterministic fallback constants and simulated delay in node handlers.
-
----
-
-## Roadmap ideas
-
-- Add auth + per-user session ownership.
-- Replace in-memory graph checkpointing with persistent checkpointer.
-- Add richer deployment output format (checklists + IaC stubs).
-- Add contract tests for each phase endpoint and state transition.
-- Add observability dashboards for token usage and phase latency.
+- Add automated integration tests for full phase transition matrix.
+- Align QA response rendering and shape contracts end-to-end.
+- Move from in-memory checkpointer to persistent checkpointer backend.
+- Add authentication and ownership checks for `session_id` access.
+- Add retry/backoff and observability around LLM calls.
